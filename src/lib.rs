@@ -11,6 +11,7 @@ struct PuluGrit {
     bsm_env: f32,
     bsm_buffer: [f32; BSM_BUFFER_SIZE],
     bsm_buffer_pos: usize,
+    dc_env: f32,
 }
 
 impl PuluGrit {
@@ -76,24 +77,47 @@ impl PuluGrit {
             }
         }
 
-        // for (pos = 0; pos < sample_count; pos++) {
-	//     if (fabs(input[pos]) > env) {
-	//         env = fabs(input[pos]);
-	//     } else {
-	//         env = fabs(input[pos]) * env_tr + env * (1.0f - env_tr);
-	//     }
-	//     if (env <= knee) {
-	//         env_sc = 1.0f / knee;
-	//     } else {
-	//         env_sc = 1.0f / env;
-	//     }
-	//     buffer[buffer_pos] = input[pos];
-	//     output[pos] = buffer[(buffer_pos - delay) & BUFFER_MASK] * env_sc;
-	//     buffer_pos = (buffer_pos + 1) & BUFFER_MASK;
-        // }
+        ProcessStatus::Normal
+    }
 
-        // plugin_data->env = env;
-        // plugin_data->buffer_pos = buffer_pos;
+    fn dirt_compressor_process(
+        &mut self,
+        buffer: &mut Buffer,
+    ) -> ProcessStatus {
+        let speed = self.params.dc_speed.value();
+        let bug_compatible = self.params.dc_bug_compatible.value();
+
+        for channel_samples in buffer.iter_samples() {
+            let mut max = 0.0;
+            if bug_compatible {
+                for sample in channel_samples {
+                    let samp = *sample;
+                    if samp.abs() > max {
+                        max = samp;
+                    }
+                }
+            } else {
+                for sample in channel_samples {
+                    let samp = *sample;
+                    if samp.abs() > max.abs() {
+                        max = samp;
+                    }
+                }
+            }
+
+            self.dc_env += speed / self.sample_rate;
+            let in_env_abs = (max * self.dc_env).abs();
+            if in_env_abs > 1.0 {
+                self.dc_env /= in_env_abs;
+            }
+        }
+
+        for channel_samples in buffer.iter_samples() {
+            for sample in channel_samples {
+                *sample *= self.dc_env;
+            }
+        }
+        
         ProcessStatus::Normal
     }
 }
@@ -106,6 +130,7 @@ impl Default for PuluGrit {
             bsm_env: 0.0,
             bsm_buffer: [0.0; BSM_BUFFER_SIZE],
             bsm_buffer_pos: 0,
+            dc_env: 0.0,
         }
     }
 }
@@ -115,7 +140,8 @@ pub fn v2s_algorithm_formatter() -> Arc<dyn Fn(i32) -> String + Send + Sync> {
         let names = [
             "Clip",
             "SuperDirt Shape",
-            "Barry's Satan Maximizer"
+            "Barry's Satan Maximizer",
+            "Dirt Compressor",
         ];
         let name = if value >= 0 && (value as usize) < names.len() {
             names[value as usize]
@@ -142,6 +168,12 @@ struct PuluGritParams {
     
     #[id = "bsm_knee"]
     pub bsm_knee: FloatParam,
+
+    #[id = "dirtcomp_speed"]
+    pub dc_speed: FloatParam,
+
+    #[id = "dirtcomp_bug_compatible"]
+    pub dc_bug_compatible: BoolParam,
 }
 
 impl Default for PuluGritParams {
@@ -152,7 +184,7 @@ impl Default for PuluGritParams {
                 0,
                 IntRange::Linear {
                     min: 0,
-                    max: 2,
+                    max: 3,
                 },
             )
                 .with_value_to_string(v2s_algorithm_formatter())
@@ -200,6 +232,21 @@ impl Default for PuluGritParams {
                 .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
                 .with_string_to_value(formatters::s2v_f32_gain_to_db())
                 ,
+
+            dc_speed: FloatParam::new(
+                "DC: Speed",
+                1.0,
+                FloatRange::Skewed {
+                    min: 1.0,
+                    max: 50000.0,
+                    factor: FloatRange::skew_factor(-3.0),
+                },
+            ),
+
+            dc_bug_compatible: BoolParam::new(
+                "DC: Bug Compatible",
+                false
+            ),
         }
     }
 }
@@ -287,6 +334,7 @@ impl Plugin for PuluGrit {
             0 => self.clip_process(buffer),
             1 => self.superdirt_shape_process(buffer),
             2 => self.barrys_satan_maximizer_process(buffer),
+            3 => self.dirt_compressor_process(buffer),
             _ => ProcessStatus::Normal
         }
     }
